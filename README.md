@@ -1,130 +1,78 @@
-# fleet-template-v1
+# shUnit2 template
 
-## What This Template Is
+Provisioned from [`Qode-Fleet-Control/fleet-template-v1`](https://github.com/Qode-Fleet-Control/fleet-template-v1) — the fleet
+lifecycle contract (`bin/`, `fleet.conf`, `compose.yaml`, deploy workflows) with a
+shUnit2 starter laid on top. **A job, not a service**: the image's default command runs the
+check and exits 0 on success; nothing listens on `$PORT`.
 
-`fleet-template-v1` is a **language-agnostic app lifecycle harness** for apps
-managed by the fleet platform. It gives any app — Node, Python, Go, a Docker
-Compose stack, anything — a uniform way to be deployed and controlled, without
-the fleet needing to know a single thing about your stack.
+## What it is
 
-The fleet injects runtime variables into the environment (`PORT`, `BASE_PATH`,
-`DATABASE_URL`) and calls `./bin/run` to deploy. Everything project-specific —
-how to install, build, and start your app — lives in **one file: `fleet.conf`**.
-That is the only file you edit per project.
+A small POSIX sh library and its [shUnit2](https://github.com/kward/shunit2) xUnit tests:
 
-## Repository Structure
+| path | what |
+|---|---|
+| `lib/path.sh` | the library: `path_join`, `path_ext`, `path_stem`, `path_is_abs` |
+| `tests/test_path.sh` | its tests — `test*` functions, `oneTimeSetUp`/`setUp`/`tearDown`, `assertEquals`/`assertTrue`/`assertFalse`, shUnit2 sourced last |
+| `scripts/test.sh` | runs every `tests/test_*.sh` under each shell given (`sh`, `bash` …) |
+| `scripts/install.sh` | local download of shUnit2 into `./.tools/shunit2` (sha256-checked) |
 
-```
-fleet.conf        ← the only file you edit per project
-.env              ← local-only env vars (gitignored)
-bin/
-  _common.sh      ← shared logic; never edit this
-  run             ← install + build + start (called by the fleet)
-  start           ← start only (no rebuild)
-  restart         ← stop + full run
-  reload          ← hot-reload config without rebuild
-  stop            ← stop the running process
-```
+## Run it
 
-## The One File You Edit: `fleet.conf`
+**With docker** (what the fleet does):
 
-`fleet.conf` is sourced as shell by the lifecycle scripts. Fill in the commands
-for your stack; leave any command empty (`''`) to skip that step.
+    docker compose build
+    docker compose run --rm app          # all tests under sh and bash; exit 0 = pass
 
-```sh
-NAME="my-app"           # label shown in fleet logs
-PORT="3000"             # default port (fleet overrides via $PORT env var)
-HEALTH_PATH="/"         # HTTP path that returns 200 when the app is ready
+**Without docker** (needs a POSIX sh, curl, sha256sum):
 
-INSTALL_CMD='npm ci'
-BUILD_CMD='npm run build'
-START_CMD='node dist/server.js'   # must listen on $PORT; run in foreground
-RELOAD_CMD=''           # optional; empty → falls back to stop+start
-```
+    sh scripts/install.sh                # = fleet.conf INSTALL_CMD
+    sh scripts/test.sh sh bash           # or a single file: sh tests/test_path.sh
 
-> **Critical rule:** single-quote any command that uses `$PORT` or
-> `$BASE_PATH`. Single quotes defer variable expansion to **runtime** — when the
-> command actually runs, with the fleet-injected value — rather than at the
-> moment `fleet.conf` is sourced (when those values aren't set yet). Use
-> `START_CMD='gunicorn app:app --bind 0.0.0.0:$PORT'`, never double quotes.
+## Origin
 
-## How the Lifecycle Works
+    hand-written (shUnit2 ships no project generator) — the test-file shape from the
+    shUnit2 README: test* functions, then `. shunit2` as the last line
 
-| Script | What it does | When to use |
-| --- | --- | --- |
-| `bin/run` | `INSTALL_CMD` → `BUILD_CMD` → `START_CMD` | Fleet deploy, fresh start |
-| `bin/start` | `START_CMD` only | Restart without rebuild |
-| `bin/restart` | stop + `bin/run` | After a code/dep change |
-| `bin/reload` | `RELOAD_CMD`, or stop+start if empty | After a config-only change |
-| `bin/stop` | Kill by pidfile or port | Tear down |
+shUnit2 v2.1.8 (`https://raw.githubusercontent.com/kward/shunit2/v2.1.8/shunit2`, sha256
+`d8f8fb2caff6e3ff77cea8837d1ae5e4fed857fe2948f9859f24f72c43814c28`). Runtime image:
+the official `bash:5.2` (alpine: `/bin/sh` is busybox ash, plus bash).
 
-> The process PID is written to `.fleet/app.pid` so subsequent `stop`/`restart`
-> calls can find and terminate it reliably. If the pidfile is missing or stale,
-> `stop` falls back to freeing whatever is listening on `$PORT`.
+## Deviations from stock output, and why
 
-## How to Apply This to Your Project
+- The test file finds shUnit2 through `$SHUNIT2` (set in the image), then
+  `./.tools/shunit2`, then `shunit2` on PATH, instead of a hard-coded path — so the
+  same file runs in docker and locally.
+- `scripts/test.sh` runs the suite under more than one shell, since portability is
+  usually the point of testing shell code.
+## Verified
 
-### Step 1 — Copy the template into your repo
+**The docker image has NOT been built or run yet**: on 2026-10-05 the shared build host's docker disk was full (0-2 GB free for over 8 hours), so `docker compose build` was never attempted. Run `docker compose build && docker compose run --rm app` once before trusting it.
 
-```sh
-cp -r fleet-template-v1/* my-project/
-```
+Without docker (2026-10-05): `sh scripts/install.sh` fetched shUnit2 v2.1.8 (checksum OK),
+and `sh scripts/test.sh sh bash` ran 7 tests, all OK, under both shells.
 
-Or, if starting fresh, just clone it and work from `main`.
 
-### Step 2 — Edit `fleet.conf` (the only required change)
+## Fleet lifecycle
 
-Fill in your stack's commands. Per-stack examples:
+`fleet.conf` drives every script in `bin/` (see `docs/fleet-lifecycle.md`). On the fleet
+the docker runtime runs `DOCKER_BUILD_CMD` (`docker compose build`) and, because this is
+a job and not a service, stops there: `DOCKER_START_CMD` is empty, the same as
+`START_CMD`. Run the job itself with `docker compose run --rm app`.
 
-```sh
-# Node.js
-INSTALL_CMD='npm ci'
-BUILD_CMD='npm run build'
-START_CMD='node dist/index.js'
+    ./bin/run                    # docker runtime: builds the image, then stops (no server)
+    docker compose run --rm app  # runs the job; exit code 0 = pass
+    FLEET_RUNTIME=process ./bin/run   # no docker: runs INSTALL_CMD, then stops at start
 
-# Python (Gunicorn)
-INSTALL_CMD='pip install -r requirements.txt'
-BUILD_CMD=''
-START_CMD='gunicorn app:app --bind 0.0.0.0:$PORT'
+`bin/run` ends with the template's own "no START_CMD" message — that is intentional.
 
-# Go
-INSTALL_CMD=''
-BUILD_CMD='go build -o ./out/server ./cmd/server'
-START_CMD='./out/server'
+## Serving over HTTP
 
-# Docker Compose
-INSTALL_CMD=''
-BUILD_CMD='docker compose build'
-START_CMD='docker compose up'
-RELOAD_CMD='docker compose up -d --no-build'
-```
+Fleet apps are served at the root of their own hostname
+(`https://<hash>.<FLEET_APP_DOMAIN>/`). **This repo has no HTTP surface**: `PORT`,
+`HEALTH_PATH` and `START_CMD` are empty and `compose.yaml` publishes nothing. If you add
+an HTTP endpoint, listen on `0.0.0.0:$PORT` (read at runtime), serve at `/`, set `PORT`,
+`HEALTH_PATH`, `START_CMD` and `DOCKER_START_CMD='docker compose up --remove-orphans'`
+in `fleet.conf`, and publish `"${PORT:-N}:${PORT:-N}"` in `compose.yaml`.
 
-### Step 3 — Set local env vars in `.env` (gitignored)
-
-```sh
-APP_NAME=My App
-DATABASE_URL=postgres://localhost/mydb
-```
-
-### Step 4 — Verify standalone
-
-```sh
-PORT=3001 bin/run      # should install, build, and serve on 3001
-curl http://localhost:3001/   # should 200
-```
-
-### Step 5 — Connect to the fleet
-
-Point the fleet at your repo. It will clone it, inject `PORT` / `BASE_PATH` /
-`DATABASE_URL`, and call `bin/run`. As long as your `START_CMD` listens on
-`$PORT` and `HEALTH_PATH` returns 200, the fleet will mark the app healthy.
-
-## Key Invariants
-
-- **`START_CMD` must run in the foreground and listen on `$PORT`.** Do not use a
-  dev server — HMR / hot-reload chunks 404 behind the ingress and will break the
-  app.
-- **Never put secrets in `fleet.conf`** — it's committed. Use `.env` locally;
-  the fleet injects secrets via the environment.
-- **`bin/_common.sh` is shared infrastructure** — don't edit it per project. All
-  project-specific configuration belongs in `fleet.conf`.
+`compose.yaml` passes the fleet's variables (`DATABASE_URL`, `REDIS_URL`, `S3_*`,
+`SMTP_*` …) through to the container without values; this template reads none of them.
